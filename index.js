@@ -3,7 +3,8 @@ import bodyParser from "body-parser";
 import TelegramBot from "node-telegram-bot-api";
 import ftp from "basic-ftp";
 import axios from "axios";
-import fs from "fs/promises"; // برای کار با فایل‌های موقت
+import * as fsPromises from "fs/promises"; // برای توابع promise-based مثل mkdir و unlink
+import fs from "fs"; // برای توابع stream-based مثل createWriteStream
 import path from "path"; // برای مسیردهی فایل‌ها
 
 // ⬇️ اگر می‌خوای کد رو به صورت محلی تست کنی (روی کامپیوتر خودت)
@@ -99,8 +100,8 @@ app.post("/upload", async (req, res) => {
     const tempFileName = `${Date.now()}_${fileName}`; // نام فایل موقت یونیک برای جلوگیری از تداخل
     const tempFilePath = path.join("/tmp", tempFileName); // Render از /tmp برای فایل‌های موقت استفاده می‌کنه
     
-    // اطمینان از وجود دایرکتوری /tmp
-    await fs.mkdir(path.dirname(tempFilePath), { recursive: true });
+    // اطمینان از وجود دایرکتوری /tmp با استفاده از fsPromises
+    await fsPromises.mkdir(path.dirname(tempFilePath), { recursive: true });
 
     const response = await axios({
       method: 'get',
@@ -108,7 +109,7 @@ app.post("/upload", async (req, res) => {
       responseType: 'stream',
     });
 
-    // ذخیره فایل دانلود شده
+    // ذخیره فایل دانلود شده با استفاده از fs (نسخه سنتی)
     const writer = fs.createWriteStream(tempFilePath);
     response.data.pipe(writer);
 
@@ -134,7 +135,7 @@ app.post("/upload", async (req, res) => {
 
       // اطمینان از وجود مسیر FTP مقصد
       await client.ensureDir(FTP_PATH);
-      console.log(`📂 مسیر FTP مقصد ایجاد/تایید شد: ${FTP_PATH}`);
+      console.log(`📂 مسیر FTP مقصد ایج: ${FTP_PATH}`);
 
       // ساخت مسیر نهایی فایل روی FTP (استفاده از / برای جداکننده مسیر در FTP)
       const remoteFilePath = path.join(FTP_PATH, fileName).replace(/\\/g, '/');
@@ -142,7 +143,7 @@ app.post("/upload", async (req, res) => {
       console.log(`📤 فایل به FTP آپلود شد: ${remoteFilePath}`);
       
       await bot.sendMessage(chatId, `✨ فایل با موفقیت آپلود شد!\nآدرس: \`${remoteFilePath}\``, { parse_mode: 'Markdown' });
-    } catch (ftpError) {
+    } catc (ftpError) {
       console.error("❌ خطای آپلود FTP:", ftpError);
       await bot.sendMessage(chatId, "⚠️ خطایی در آپلود فایل به FTP رخ داد.");
     } finally {
@@ -150,21 +151,8 @@ app.post("/upload", async (req, res) => {
       console.log("FTP connection closed.");
     }
 
-    // 4. حذف فایل موقت از سرور Render
-    await fs.unlink(tempFilePath);
+    // 4. حذف فایل موقت از سرور Render با استفاده از fsPromises
+    await fsPromises.unlink(tempFilePath);
     console.log(`🗑️ فایل موقت حذف شد: ${tempFilePath}`);
 
-    res.status(200).send("Webhook OK ✅"); // پاسخ موفقیت‌آمیز به تلگرام
-
-  } catch (error) {
-    console.error("❌ خطای کلی در پردازش Webhook:", error);
-    await bot.sendMessage(chatId, "🚨 خطای ناشناخته‌ای در پردازش درخواست شما رخ داد.");
-    res.status(500).send("Error processing request.");
-  }
-});
-
-// --- 🚀 شروع به گوش دادن سرور ---
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`✅ سرور TunerHiv روی پورت ${PORT} در حال اجراست.`);
-});
+    res.status(200).send("
