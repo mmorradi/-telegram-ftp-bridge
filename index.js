@@ -1,51 +1,75 @@
 import express from "express";
-import fetch from "node-fetch";
-import ftp from "basic-ftp";
 import dotenv from "dotenv";
+import TelegramBot from "node-telegram-bot-api";
+import ftp from "basic-ftp";
 
 dotenv.config();
+
 const app = express();
 app.use(express.json());
 
+// -------------------------------
+// Telegram Bot setup
+// -------------------------------
+const TOKEN = process.env.TELEGRAM_TOKEN;
+const bot = new TelegramBot(TOKEN, { polling: false });
+
+// مسیر Webhook از تلگرام:
 app.post("/upload", async (req, res) => {
   try {
-    const fileId = req.body.message.document.file_id;
-    const chatId = req.body.message.chat.id;
+    const message = req.body.message;
+    if (!message || !message.document) {
+      return res.status(200).send("No document");
+    }
 
-    const response = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/getFile?file_id=${fileId}`);
-    const data = await response.json();
-    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_TOKEN}/${data.result.file_path}`;
+    const fileId = message.document.file_id;
+    const chatId = message.chat.id;
 
+    // دریافت لینک موقت فایل از تلگرام
+    const file = await bot.getFile(fileId);
+    const fileUrl = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`;
+
+    // اتصال به FTP
     const client = new ftp.Client();
+    client.ftp.verbose = false;
+
     await client.access({
       host: process.env.FTP_HOST,
       user: process.env.FTP_USER,
-      password: process.env.FTP_PASS
+      password: process.env.FTP_PASS,
+      secure: false,
     });
 
-    const fileName = data.result.file_path.split("/").pop();
-    await client.uploadFrom(await fetch(fileUrl).then(r => r.body), process.env.FTP_PATH + fileName);
+    const fileName = message.document.file_name;
+    const remotePath = `${process.env.FTP_PATH}${fileName}`;
+
+    // دریافت فایل از تلگرام و آپلود به هاست آروان:
+    const response = await fetch(fileUrl);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await client.uploadFrom(buffer, remotePath);
+
+    // لینک دانلود نهایی:
+    const dlLink = `https://dl.mrdiagcenter.ir/temp/${fileName}`;
+
+    // ارسال لینک به کاربر:
+    await bot.sendMessage(chatId, `✅ فایل آماده‌ست:\n${dlLink}`);
+
     client.close();
-
-    setTimeout(async () => {
-      await client.access({
-        host: process.env.FTP_HOST,
-        user: process.env.FTP_USER,
-        password: process.env.FTP_PASS
-      });
-      await client.remove(process.env.FTP_PATH + fileName);
-      client.close();
-    }, 120000);
-
-    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage?chat_id=${chatId}&text=https://dl.yourdomain.com/temp/${fileName}`);
-
-    res.send("✅ Upload success");
+    res.send("OK");
   } catch (err) {
     console.error(err);
-    res.status(500).send("Error uploading file.");
+    res.status(500).send("Error");
   }
 });
 
-app.get("/", (_, r) => r.send("Bot server is running ✅"));
+// -------------------------------
+// Health Check
+// -------------------------------
+app.get("/", (req, res) => {
+  res.send("TunerHivBot Server Running 🟢");
+});
 
-app.listen(3000);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`✅ Server is running on port ${PORT}`);
+});
