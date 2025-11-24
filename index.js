@@ -6,95 +6,84 @@ import axios from "axios";
 import * as fsPromises from "fs/promises";
 import fs from "fs";
 import path from "path";
-import { randomUUID } from 'crypto'; // برای تولید شناسه منحصر به فرد
+import { randomUUID } from "crypto";
 
 const app = express();
 app.use(bodyParser.json());
 
-// --- 🔑 متغیرهای محیطی ضروری برای Render ---
+// --- 🔑 Environment Variables ---
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const FTP_HOST = process.env.FTP_HOST;
 const FTP_USER = process.env.FTP_USER;
 const FTP_PASS = process.env.FTP_PASS;
-const FTP_PATH = process.env.FTP_PATH || "/public_html/temp/";
+const FTP_PATH = process.env.FTP_PATH || "/temp";
+const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const PORT = process.env.PORT || 10000;
 
-// بررسی وجود متغیرهای محیطی حیاتی
+// --- 🛠 پیش‌شرط‌ها ---
 if (!TELEGRAM_BOT_TOKEN || !FTP_HOST || !FTP_USER || !FTP_PASS) {
-  console.error("❌ خطای پیکربندی: متغیرهای محیطی مورد نیاز پیدا نشدند! " +
-                "لطفا TELEGRAM_BOT_TOKEN, FTP_HOST, FTP_USER, FTP_PASS را در Render تنظیم کنید.");
+  console.error(
+    "❌ خطای پیکربندی: لطفاً TELEGRAM_BOT_TOKEN, FTP_HOST, FTP_USER, FTP_PASS را در Render تنظیم کنید."
+  );
   process.exit(1);
 }
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+const uploadedFiles = new Map(); // حافظه موقت
 
-// --- 💾 ذخیره‌سازی موقت اطلاعات فایل‌ها در حافظه ---
-// ⚠️ توجه: این Map در صورت ری‌استارت شدن سرویس Render، پاک می‌شود!
-// برای پایداری بیشتر، نیاز به دیتابیس خارجی (مثلاً Redis) است.
-// Key: uniqueId (UUID), Value: { fileId, chatId, fileName, ftpFilePath, uploadTimestamp, timeoutId, originalMessageId, deleteMessageId }
-const uploadedFiles = new Map(); 
-
-// --- 🌐 Route اصلی برای بررسی وضعیت سرور ---
+// --- 🌐 Route آزمایشی برای بررسی سلامت سرور ---
 app.get("/", (req, res) => {
-  res.send("TunerHiv server online 🟢 و آماده دریافت فایل!");
+  res.send("🟢 TunerHiv Render server online and ready!");
 });
 
-// --- 📩 Route برای دریافت Webhook تلگرام و پردازش فایل ---
+// --- 📩 Webhook اصلی تلگرام ---
 app.post("/upload", async (req, res) => {
   const update = req.body;
 
   if (!update || (!update.message && !update.callback_query)) {
-    console.log("❌ بروزرسانی تلگرام حاوی پیام معتبر یا callback_query نبود.");
-    return res.status(200).send("No message or callback_query to process.");
+    console.log("❌ بروزرسانی معتبر از تلگرام یافت نشد.");
+    return res.status(200).send("Invalid update");
   }
 
-  // 1. **مهمترین گام برای جلوگیری از لوپ:** بلافاصله پاسخ 200 OK را به تلگرام برگردانید.
-  // این تضمین می‌کند که تلگرام به‌روزرسانی را دوباره ارسال نمی‌کند.
-  res.status(200).send("Webhook received and processing started.");
+  // پاسخ فوری برای جلوگیری از loop تلگرام:
+  res.status(200).send("Webhook received.");
 
-  // 2. حالا پردازش‌های سنگین‌تر را به صورت آسنکرون انجام دهید.
   if (update.message) {
-    processTelegramFile(update.message).catch(error => {
-      console.error("❌ خطای کلی در پردازش فایل تلگرام:", error);
-      // این خطاها به کاربر از طریق بات اطلاع داده می‌شوند، نه از طریق پاسخ HTTP.
-      // اگر اینجا خطایی رخ دهد (مثلاً ارتباط با تلگرام قطع باشد)، پیام خطا به کاربر نمی‌رسد.
-      // برای اطمینان بیشتر، می‌توان retry mechanism برای sendMessage هم در نظر گرفت.
-      // اما در حال حاضر، تمرکز بر روی upload و delete است.
-    });
+    processTelegramFile(update.message).catch((error) =>
+      console.error("❌ خطای اصلی در پردازش فایل تلگرام:", error)
+    );
   } else if (update.callback_query) {
-    processCallbackQuery(update.callback_query).catch(error => {
-      console.error("❌ خطای کلی در پردازش callback_query:", error);
-      // این خطاها به کاربر از طریق بات اطلاع داده می‌شوند.
-    });
+    processCallbackQuery(update.callback_query).catch((error) =>
+      console.error("❌ خطای کلی در پردازش callback_query:", error)
+    );
   }
 });
 
-// --- ⚙️ تابع کمکی برای انجام عملیات با مکانیزم تکرار ---
+// --- ⚙️ تابع کمک‌کننده برای Retry ---
 async function performWithRetries(action, maxRetries = 3, delayMs = 1000) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       return await action();
     } catch (error) {
-      console.warn(`⚠️ تلاش ${i + 1} ناموفق بود: ${error.message}. در حال تلاش مجدد...`);
-      if (i < maxRetries - 1) {
-        await new Promise(resolve => setTimeout(resolve, delayMs * (i + 1))); // تاخیر با Exponential Backoff
-      } else {
-        throw error; // بعد از حداکثر تلاش، خطا را پرتاب کن
-      }
+      console.warn(`⚠️ تلاش ${i + 1} ناموفق بود (${error.message}).`);
+      if (i < maxRetries - 1)
+        await new Promise((res) => setTimeout(res, delayMs * (i + 1)));
+      else throw error;
     }
   }
 }
 
-// --- 📝 تابع پردازش فایل تلگرام (بعد از ارسال پاسخ 200 OK) ---
+// --- 🧾 پردازش فایل تلگرام ---
 async function processTelegramFile(message) {
   const chatId = message.chat.id;
   let fileId, fileName, caption;
-  let tempFilePath = null; // تعریف اولیه tempFilePath در این scope
+  let tempFilePath = null;
 
   if (message.document) {
     fileId = message.document.file_id;
     fileName = message.document.file_name;
     caption = message.caption;
-  } else if (message.photo && message.photo.length > 0) {
+  } else if (message.photo?.length > 0) {
     const largestPhoto = message.photo[message.photo.length - 1];
     fileId = largestPhoto.file_id;
     fileName = `photo_${fileId}.jpg`;
@@ -111,47 +100,40 @@ async function processTelegramFile(message) {
     fileId = message.voice.file_id;
     fileName = `voice_${fileId}.ogg`;
     caption = message.caption;
-  } else if (message.sticker) {
-    fileId = message.sticker.file_id;
-    fileName = `sticker_${fileId}.webp`;
-    caption = message.caption;
   } else {
-    console.log("🔍 هیچ فایل یا رسانه‌ای در پیام تلگرام پیدا نشد.");
-    await bot.sendMessage(chatId, "🤔 هیچ فایل یا رسانه‌ای در پیام شما پیدا نکردم که آپلود کنم.");
+    await bot.sendMessage(chatId, "🤔 هیچ فایل قابل آپلود پیدا نشد.");
     return;
   }
 
-  // فرستادن پیام اولیه که در حال پردازشه، تا کاربر بفهمه
-  const processingMessage = await bot.sendMessage(chatId, `🚀 در حال پردازش فایل شما: \`${fileName}\` لطفا منتظر بمانید...`, { parse_mode: 'Markdown' });
+  const processingMessage = await bot.sendMessage(
+    chatId,
+    `🚀 در حال پردازش فایل: \`${fileName}\` ...`,
+    { parse_mode: "Markdown" }
+  );
 
   try {
-    // 1. دریافت لینک دانلود فایل از تلگرام
+    // --- ۱. گرفتن لینک از تلگرام و دانلود ---
     const fileLink = await bot.getFileLink(fileId);
-    console.log(`📥 در حال دانلود از تلگرام: ${fileLink}`);
+    console.log(`📥 دانلود از تلگرام: ${fileLink}`);
 
-    // 2. دانلود فایل به یک مسیر موقت روی سرور Render (با مکانیزم تکرار)
     const tempFileName = `${Date.now()}_${fileName}`;
-    tempFilePath = path.join("/tmp", tempFileName); // اختصاص مقدار به tempFilePath
+    tempFilePath = path.join("/tmp", tempFileName);
     await fsPromises.mkdir(path.dirname(tempFilePath), { recursive: true });
 
     await performWithRetries(async () => {
-      const response = await axios({
-        method: 'get',
-        url: fileLink,
-        responseType: 'stream',
-      });
+      const response = await axios({ method: "get", url: fileLink, responseType: "stream" });
       const writer = fs.createWriteStream(tempFilePath);
       response.data.pipe(writer);
       await new Promise((resolve, reject) => {
-        writer.on('finish', resolve);
-        writer.on('error', reject);
+        writer.on("finish", resolve);
+        writer.on("error", reject);
       });
-      console.log(`✅ فایل به مسیر موقت دانلود شد: ${tempFilePath}`);
+      console.log("✅ فایل موقت دانلود شد:", tempFilePath);
     });
 
-    // 3. آپلود فایل به سرور FTP (با مکانیزم تکرار)
+    // --- ۲. آپلود FTP ---
     const client = new ftp.Client();
-    let ftpFilePath; // این متغیر مسیر نهایی فایل در FTP را نگه می‌دارد
+    let ftpFilePath;
 
     try {
       await performWithRetries(async () => {
@@ -159,143 +141,143 @@ async function processTelegramFile(message) {
           host: FTP_HOST,
           user: FTP_USER,
           password: FTP_PASS,
-          secure: false, // ⚠️ اگر هاست FTP شما از FTPS (FTP over SSL/TLS) پشتیبانی می‌کنه، این رو true بذارید.
+          secure: false,
         });
-        console.log(`🟢 به FTP متصل شد: ${FTP_HOST}`);
         await client.ensureDir(FTP_PATH);
-        console.log(`📂 مسیر FTP مقصد ایجاد/تایید شد: ${FTP_PATH}`);
-        ftpFilePath = path.join(FTP_PATH, fileName).replace(/\\/g, '/');
+        ftpFilePath = path.join(FTP_PATH, fileName).replace(/\\/g, "/");
         await client.uploadFrom(tempFilePath, ftpFilePath);
-        console.log(`📤 فایل به FTP آپلود شد: ${ftpFilePath}`);
+        console.log(`📤 آپلود شد: ${ftpFilePath}`);
       });
 
-      // 4. حذف فایل موقت از سرور Render
-      if (tempFilePath && fs.existsSync(tempFilePath)) { // اطمینان از وجود و تعریف tempFilePath قبل از حذف
+      // حذف فایل موقت
+      if (fs.existsSync(tempFilePath)) {
         await fsPromises.unlink(tempFilePath);
-        console.log(`🗑️ فایل موقت حذف شد: ${tempFilePath}`);
-        tempFilePath = null; // پس از حذف، دوباره null می‌کنیم
+        console.log("🗑 فایل موقت حذف شد.");
       }
 
-      // 5. ارسال پیام موفقیت‌آمیز به کاربر با دکمه حذف
-      const uniqueDeleteId = randomUUID(); // تولید شناسه منحصر به فرد و کوتاه
-      const fileUrl = `http://${FTP_HOST}${ftpFilePath.startsWith('/') ? '' : '/'}${ftpFilePath}`; // فرض کنید فایل از طریق http://${FTP_HOST}/public_html/temp/ قابل دسترسه
+      // --- لینک عمومی و دکمه‌ها ---
+      const uniqueDeleteId = randomUUID();
+      const fileUrl = `https://tunerhiv.ir${ftpFilePath.startsWith("/") ? "" : "/"}${ftpFilePath}`;
+
       const sentMessage = await bot.editMessageText(
-        `✨ فایل با موفقیت آپلود شد!\n\n🔗 لینک فایل: \`${fileUrl}\`\n\n_این فایل به صورت خودکار پس از ۱۲ ساعت حذف خواهد شد._`,
+        `✅ فایل *${fileName}* با موفقیت آپلود شد.`,
         {
           chat_id: chatId,
           message_id: processingMessage.message_id,
-          parse_mode: 'Markdown',
+          parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
-              [{ text: "حذف فوری فایل 🗑️", callback_data: `delete_${uniqueDeleteId}` }] // استفاده از uniqueDeleteId
-            ]
-          }
+              [
+                { text: "⬇️ دانلود فایل", url: fileUrl },
+                { text: "🗑 حذف فایل", callback_data: `delete_${uniqueDeleteId}` },
+              ],
+            ],
+          },
         }
       );
 
-      // 6. زمان‌بندی حذف خودکار پس از 12 ساعت (43200000 میلی‌ثانیه)
+      // حذف خودکار پس از ۱۲ ساعت
       const deleteTimeout = setTimeout(async () => {
         try {
-          const clientForDelete = new ftp.Client();
-          await clientForDelete.access({ host: FTP_HOST, user: FTP_USER, password: FTP_PASS, secure: false });
-          await clientForDelete.remove(ftpFilePath);
-          clientForDelete.close();
-          // مطمئن میشیم پیامی که ادیت میشه هنوز وجود داره و حذف نشده
+          const delClient = new ftp.Client();
+          await delClient.access({
+            host: FTP_HOST,
+            user: FTP_USER,
+            password: FTP_PASS,
+            secure: false,
+          });
+          await delClient.remove(ftpFilePath);
+          delClient.close();
+
           if (uploadedFiles.has(uniqueDeleteId)) {
             await bot.editMessageText(
-              `🗑️ فایل \`${fileName}\` به صورت خودکار از FTP حذف شد. (پس از 12 ساعت)`,
-              { chat_id: chatId, message_id: sentMessage.message_id, parse_mode: 'Markdown' }
+              `🗑️ فایل \`${fileName}\` پس از ۱۲ ساعت به‌صورت خودکار حذف شد.`,
+              {
+                chat_id: chatId,
+                message_id: sentMessage.message_id,
+                parse_mode: "Markdown",
+              }
             );
           }
-          uploadedFiles.delete(uniqueDeleteId); // حذف از Map
-          console.log(`🗑️ فایل ${fileName} به صورت خودکار از FTP حذف شد.`);
-        } catch (autoDeleteError) {
-          console.error(`❌ خطای حذف خودکار فایل ${fileName} از FTP:`, autoDeleteError);
-          // اگر فایل از قبل حذف شده بود یا مشکل دیگری بود، به کاربر اطلاع نمی‌دهیم.
+          uploadedFiles.delete(uniqueDeleteId);
+          console.log(`🗑 حذف خودکار: ${fileName}`);
+        } catch (err) {
+          console.error(`❌ خطا در حذف خودکار ${fileName}:`, err);
         }
-      }, 12 * 60 * 60 * 1000); // 12 hours
+      }, 12 * 60 * 60 * 1000);
 
-      // 7. ذخیره اطلاعات فایل در Map برای حذف دستی/اتوماتیک
       uploadedFiles.set(uniqueDeleteId, {
-        fileId: fileId, // fileId اصلی تلگرام را هم ذخیره می‌کنیم
-        chatId: chatId,
-        fileName: fileName,
-        ftpFilePath: ftpFilePath,
-        uploadTimestamp: Date.now(),
+        fileName,
+        ftpFilePath,
         timeoutId: deleteTimeout,
-        originalMessageId: message.message_id,
-        deleteMessageId: sentMessage.message_id
+        messageId: sentMessage.message_id,
+        chatId,
       });
-
     } finally {
       client.close();
-      console.log("FTP connection closed.");
     }
-
   } catch (error) {
-    console.error("❌ خطای پردازش فایل:", error);
-    // سعی می‌کنیم به کاربر اطلاع دهیم.
+    console.error("❌ خطا در upload:", error);
     await bot.editMessageText(
-      `🚨 متاسفانه مشکلی در آپلود فایل شما (\`${fileName}\`) پیش آمد: ${error.message.substring(0, Math.min(error.message.length, 100))}...`,
-      { chat_id: chatId, message_id: processingMessage.message_id, parse_mode: 'Markdown' }
-    ).catch(e => console.error("خطا در ارسال پیام خطا به کاربر:", e));
-    
-    // اگر فایل موقت ایجاد شده بود، سعی کن حذفش کنی
-    if (tempFilePath && fs.existsSync(tempFilePath)) {
-      await fsPromises.unlink(tempFilePath).catch(e => console.error("خطا در حذف فایل موقت پس از خطا:", e));
-    }
+      `🚨 خطا در آپلود فایل \`${fileName}\`: ${error.message}`,
+      { chat_id: chatId, message_id: processingMessage.message_id, parse_mode: "Markdown" }
+    );
+    if (fs.existsSync(tempFilePath))
+      await fsPromises.unlink(tempFilePath).catch((e) => console.error("❌ حذف موقت شکست:", e));
   }
 }
 
-// --- ⚡️ تابع پردازش Callback Query (برای دکمه حذف) ---
+// --- 🔁 Callback Query حذف دستی ---
 async function processCallbackQuery(callbackQuery) {
   const chatId = callbackQuery.message.chat.id;
-  const messageId = callbackQuery.message.message.id; // Corrected to access message.id
+  const messageId = callbackQuery.message.message_id;
   const data = callbackQuery.data;
 
-  // همیشه به Callback Query پاسخ بده تا لودینگ دکمه از بین بره
   await bot.answerCallbackQuery(callbackQuery.id);
 
-  if (data.startsWith('delete_')) {
-    const uniqueDeleteId = data.substring('delete_'.length);
-    const fileInfo = uploadedFiles.get(uniqueDeleteId);
+  if (data.startsWith("delete_")) {
+    const uniqueId = data.replace("delete_", "");
+    const fileInfo = uploadedFiles.get(uniqueId);
 
     if (!fileInfo) {
-      await bot.editMessageText("⚠️ اطلاعات این فایل پیدا نشد یا قبلاً حذف شده است.", { chat_id: chatId, message_id: messageId });
+      await bot.editMessageText("⚠️ فایل موردنظر پیدا نشد یا قبلاً حذف شده است.", {
+        chat_id: chatId,
+        message_id: messageId,
+      });
       return;
     }
 
-    // 1. تلاش برای حذف از FTP
     const client = new ftp.Client();
     try {
-      await client.access({ host: FTP_HOST, user: FTP_USER, password: FTP_PASS, secure: false });
+      await client.access({
+        host: FTP_HOST,
+        user: FTP_USER,
+        password: FTP_PASS,
+        secure: false,
+      });
       await client.remove(fileInfo.ftpFilePath);
       client.close();
 
-      // 2. لغو زمان‌بندی حذف خودکار
       clearTimeout(fileInfo.timeoutId);
-      uploadedFiles.delete(uniqueDeleteId); // حذف از Map
+      uploadedFiles.delete(uniqueId);
 
-      await bot.editMessageText(
-        `🗑️ فایل \`${fileInfo.fileName}\` با درخواست شما حذف شد.`,
-        { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown' }
-      );
-      console.log(`🗑️ فایل ${fileInfo.fileName} (ID: ${uniqueDeleteId}) با درخواست کاربر حذف شد.`);
-
-    } catch (deleteError) {
+      await bot.editMessageText(`🗑️ فایل \`${fileInfo.fileName}\` حذف شد.`, {
+        chat_id: chatId,
+        message_id: messageId,
+        parse_mode: "Markdown",
+      });
+    } catch (err) {
       client.close();
-      console.error(`❌ خطای حذف دستی فایل ${fileInfo.fileName} از FTP:`, deleteError);
       await bot.editMessageText(
-        `🚨 مشکلی در حذف فایل \`${fileInfo.fileName}\` پیش آمد: ${deleteError.message.substring(0, Math.min(deleteError.message.length, 100))}...`,
-        { chat_id: chatId, message_id: messageId, parse_mode: 'Markdown' }
+        `🚨 خطا در حذف فایل \`${fileInfo.fileName}\`: ${err.message}`,
+        { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" }
       );
     }
   }
 }
 
-// --- 🚀 شروع به گوش دادن سرور ---
-const PORT = process.env.PORT || 10000;
+// --- 🚀 Server Start ---
 app.listen(PORT, () => {
-  console.log(`✅ سرور TunerHiv روی پورت ${PORT} در حال اجراست.`);
-  console.log("⚠️ یادآوری: فایل‌های ذخیره شده در حافظه با ری‌استارت سرویس از بین می‌روند.");
+  console.log(`✅ TunerHiv server listening on port ${PORT}`);
+  console.log("⚠️ فایل‌های Map با ری‌استارت Render پاک می‌شوند.");
 });
