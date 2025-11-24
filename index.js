@@ -45,8 +45,7 @@ app.post("/upload", async (req, res) => {
     return res.status(200).send("Invalid update");
   }
 
-  // پاسخ فوری برای جلوگیری از loop تلگرام:
-  res.status(200).send("Webhook received.");
+  res.status(200).send("Webhook received."); // پاسخ فوری به تلگرام
 
   if (update.message) {
     processTelegramFile(update.message).catch((error) =>
@@ -79,6 +78,7 @@ async function processTelegramFile(message) {
   let fileId, fileName, caption;
   let tempFilePath = null;
 
+  // تشخیص نوع فایل
   if (message.document) {
     fileId = message.document.file_id;
     fileName = message.document.file_name;
@@ -112,7 +112,7 @@ async function processTelegramFile(message) {
   );
 
   try {
-    // --- ۱. گرفتن لینک از تلگرام و دانلود ---
+    // --- ۱. گرفتن لینک از تلگرام و دانلود فایل ---
     const fileLink = await bot.getFileLink(fileId);
     console.log(`📥 دانلود از تلگرام: ${fileLink}`);
 
@@ -149,7 +149,7 @@ async function processTelegramFile(message) {
         console.log(`📤 آپلود شد: ${ftpFilePath}`);
       });
 
-      // حذف فایل موقت
+      // حذف فایل موقت لوکال
       if (fs.existsSync(tempFilePath)) {
         await fsPromises.unlink(tempFilePath);
         console.log("🗑 فایل موقت حذف شد.");
@@ -157,8 +157,18 @@ async function processTelegramFile(message) {
 
       // --- لینک عمومی و دکمه‌ها ---
       const uniqueDeleteId = randomUUID();
-      const fileUrl = `https://tunerhiv.ir${ftpFilePath.startsWith("/") ? "" : "/"}${ftpFilePath}`;
 
+      // ✅ حذف کنترل‌شده public_html از مسیر لینک:
+      let cleanedFtpPath = ftpFilePath;
+      if (cleanedFtpPath.startsWith("public_html/")) {
+        cleanedFtpPath = cleanedFtpPath.substring("public_html/".length);
+      } else if (cleanedFtpPath.startsWith("/public_html/")) {
+        cleanedFtpPath = cleanedFtpPath.substring("/public_html/".length);
+      }
+
+      const fileUrl = `https://tunerhiv.ir${cleanedFtpPath.startsWith("/") ? "" : "/"}${cleanedFtpPath}`;
+
+      // ✉️ پیام نهایی به کاربر
       const sentMessage = await bot.editMessageText(
         `✅ فایل *${fileName}* با موفقیت آپلود شد.`,
         {
@@ -176,7 +186,7 @@ async function processTelegramFile(message) {
         }
       );
 
-      // حذف خودکار پس از ۱۲ ساعت
+      // ⏲ حذف خودکار پس از ۱۲ ساعت
       const deleteTimeout = setTimeout(async () => {
         try {
           const delClient = new ftp.Client();
@@ -276,7 +286,7 @@ async function processCallbackQuery(callbackQuery) {
   }
 }
 
-// --- 🚀 Server Start ---
+// --- 🚀 Start Server ---
 app.listen(PORT, () => {
   console.log(`✅ TunerHiv server listening on port ${PORT}`);
   console.log("⚠️ فایل‌های Map با ری‌استارت Render پاک می‌شوند.");
