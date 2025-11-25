@@ -1,17 +1,18 @@
 {
   "name": "telegram-ftp-bridge",
   "version": "1.0.0",
-  "description": "Telegram bot to upload files to FTP server via Render.com",
+  "description": "Telegram bot to upload large files to FTP server via Render using stream-to-FTP architecture.",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "body-parser": "^1.20.2",
-    "node-telegram-bot-api": "^0.66.0",
-    "basic-ftp": "^5.0.4",
-    "axios": "^1.7.2"
+    "telegraf": "^4.16.0",
+    "axios": "^1.7.2",
+    "basic-ftp": "^5.0.4"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
