@@ -2,8 +2,9 @@ import axios from "axios";
 import ftp from "basic-ftp";
 import { Telegraf, Markup } from "telegraf";
 import dotenv from "dotenv";
+import express from "express";
 
-// بارگذاری متغیرهای محیطی از Render یا فایل .env لوکال
+// بارگذاری متغیرهای محیطی از Render یا فایل .env
 dotenv.config();
 
 // ========================= Bot Init =========================
@@ -28,30 +29,25 @@ async function uploadToFTP(fileUrl, fileName) {
             secure: false,
         });
 
-        const pwd = await client.pwd();
-        console.log(`[FTP] Connected. PWD = ${pwd}`);
-
-        const list = await client.list();
-        console.log(`[FTP] Directory list:`, list.map(f => f.name));
-
-        const targetPath = `${ftpPath}/${fileName}`;
-        console.log(`[FTP] Target path: ${targetPath}`);
+        console.log(`[FTP] Connected. PWD = ${await client.pwd()}`);
+        console.log(`[FTP] Target path: ${ftpPath}/${fileName}`);
 
         // --- دریافت فایل از تلگرام به صورت استریم ---
         const response = await axios.get(fileUrl, { responseType: "stream" });
         console.log(`[STREAM] Started streaming from Telegram → FTP`);
 
         // --- ارسال مستقیم Stream به سرور FTP ---
-        await client.uploadFrom(response.data, targetPath);
-        console.log(`[STREAM] Upload completed: ${targetPath}`);
+        await client.uploadFrom(response.data, `${ftpPath}/${fileName}`);
+        console.log(`[STREAM] Upload completed: ${ftpPath}/${fileName}`);
 
         // --- ساخت لینک عمومی (بدون public_html در URL) ---
-        const fileUrlPublic = `https://tunerhiv.ir/${ftpPath}/${fileName}`;
-
+        const publicUrl = `https://tunerhiv.ir/${ftpPath}/${fileName}`;
         await client.close();
-        return fileUrlPublic;
+
+        return publicUrl;
     } catch (err) {
         console.error("❌ FTP Upload Error:", err.message);
+        await client.close();
         throw err;
     }
 }
@@ -100,13 +96,12 @@ bot.action(/delete_(.+)/, async (ctx) => {
 
         const ftpPath = process.env.FTP_PATH || "temp";
         const targetPath = `${ftpPath}/${fileName}`;
-
         await client.remove(targetPath);
+
         console.log(`✅ فایل حذف شد از FTP: ${targetPath}`);
 
         await ctx.answerCbQuery();
         await ctx.editMessageText(`🗑 فایل از سرور حذف شد.`);
-
         await client.close();
     } catch (err) {
         console.error("❌ Delete Error:", err.message);
@@ -117,3 +112,15 @@ bot.action(/delete_(.+)/, async (ctx) => {
 // ========================= Bot Launch =========================
 bot.launch();
 console.log("🚀 Telegram‑FTP Bridge Stream mode started...");
+
+// ========================= Fake Express Server (for Render keep‑alive) =========================
+const app = express();
+const PORT = process.env.PORT || 10000;
+
+app.get("/", (req, res) => {
+    res.send("Telegram‑FTP Bridge is running ✅");
+});
+
+app.listen(PORT, () => {
+    console.log(`🌐 Render keep‑alive HTTP server on port ${PORT}`);
+});
