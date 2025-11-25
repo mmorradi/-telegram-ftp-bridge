@@ -1,7 +1,7 @@
 // ========================================================
 //  Telegram–FTP Bridge  (Stream‑to‑FTP Architecture)
-//  Author: Meysam Moradi + GapGPT
-//  Version: Final stable for Render (409‑safe, full‑stream)
+//  Author : Meysam Moradi + GapGPT
+//  Version: Final stable for Render (409‑safe, Proxy‑ready)
 // ========================================================
 
 import { Telegraf, Markup } from "telegraf";
@@ -9,11 +9,12 @@ import axios from "axios";
 import ftp from "basic-ftp";
 import express from "express";
 import dotenv from "dotenv";
+import HttpsProxyAgent from "https-proxy-agent";
 
 // ---------- Load Environment Variables ----------
 dotenv.config();
 
-// ---------- Debug check BOT_TOKEN ----------
+// ---------- Debug BOT_TOKEN ----------
 console.log("DEBUG BOT_TOKEN:", process.env.BOT_TOKEN ? "✅ Loaded" : "❌ Missing");
 
 // ---------- Init Bot ----------
@@ -37,8 +38,8 @@ async function uploadToFTP(fileStream, filename) {
     const destPath = process.env.FTP_PATH
       ? `${process.env.FTP_PATH}/${filename}`
       : filename;
-
     console.log(`[FTP] Connected. Uploading ${destPath} ...`);
+
     await client.uploadFrom(fileStream, destPath);
     console.log(`[FTP] ✅ Upload completed: ${destPath}`);
   } catch (err) {
@@ -55,12 +56,12 @@ async function uploadToFTP(fileStream, filename) {
 
 // دستور /start
 bot.start((ctx) => {
-  return ctx.reply(
+  ctx.reply(
     "سلام میثم 👋\nربات فعال است ✅\nفایل بفرست تا مستقیماً به FTP استریم شود."
   );
 });
 
-// هندلر عمومی برای دیباگ نوع پیام
+// هندلر عمومی برای دیباگ نوع پیام‌ها
 bot.on("message", (ctx) => {
   if (ctx.message) {
     const keys = Object.keys(ctx.message);
@@ -68,11 +69,11 @@ bot.on("message", (ctx) => {
   }
 });
 
-// هندل ارسال فایل‌ (شامل document/photo/video/audio)
+// هندل ارسال انواع فایل‌ (document/photo/video/audio)
 bot.on(["document", "photo", "video", "audio"], async (ctx) => {
   let fileId, filename;
 
-  // به‌تناسب نوع فایل، file_id و filename استخراج شود
+  // استخراج نوع فایل
   if (ctx.message.document) {
     fileId = ctx.message.document.file_id;
     filename = ctx.message.document.file_name;
@@ -97,20 +98,34 @@ bot.on(["document", "photo", "video", "audio"], async (ctx) => {
     const fileLink = await ctx.telegram.getFileLink(fileId);
     console.log("[DEBUG] fileLink:", fileLink.href);
 
-    const response = await axios.get(fileLink.href, { responseType: "stream" });
+    // اگر تلگرام در region فعلی فیلتر بود، از proxy استفاده کن
+    const proxyAgent = process.env.TELEGRAM_PROXY
+      ? new HttpsProxyAgent(process.env.TELEGRAM_PROXY)
+      : undefined;
 
+    // Stream از تلگرام
+    const response = await axios.get(fileLink.href, {
+      responseType: "stream",
+      httpsAgent: proxyAgent,
+    });
+
+    // Upload به FTP
     await uploadToFTP(response.data, filename);
 
-    const publicUrl = `https://tunerhiv.ir/${process.env.FTP_PATH}/${filename}`;
+    const publicUrl =
+      process.env.FTP_PUBLIC_URL
+        ? `${process.env.FTP_PUBLIC_URL}/${filename}`
+        : filename;
+
     await ctx.reply(
-      `✅ ${filename}\nبا موفقیت روی FTP آپلود شد.\n${publicUrl}`,
+      `✅ فایل ${filename}\nبا موفقیت روی FTP آپلود شد.\n${publicUrl}`,
       Markup.inlineKeyboard([
         [Markup.button.callback("🗑 حذف از FTP", `delete_${filename}`)],
       ])
     );
   } catch (err) {
     console.error(`[BOT] ❌ Error processing file: ${err.message}`);
-    await ctx.reply(`خطا در آپلود ${filename}: ${err.message}`);
+    ctx.reply(`خطا در آپلود ${filename}: ${err.message}`);
   }
 });
 
@@ -119,6 +134,7 @@ bot.action(/delete_(.+)/, async (ctx) => {
   const filename = ctx.match[1];
   const client = new ftp.Client();
   client.ftp.verbose = false;
+
   try {
     await client.access({
       host: process.env.FTP_HOST,
@@ -141,7 +157,7 @@ bot.action(/delete_(.+)/, async (ctx) => {
 });
 
 // ========================================================
-//  Webhook Reset to Avoid 409 & Start Bot
+//  Webhook Reset → Prevent 409 Conflict and Start Bot
 // ========================================================
 bot.telegram
   .getWebhookInfo()
