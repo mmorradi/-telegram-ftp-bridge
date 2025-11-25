@@ -1,8 +1,10 @@
-// ========================================================
-//  Telegram–FTP Bridge  (Stream‑to‑FTP Architecture)
-//  Author : Meysam Moradi + GapGPT
-//  Version: Final stable for Render (409‑safe, Proxy‑ready)
-// ========================================================
+// ======================================================
+// Telegram‑to‑FTP Bridge  — Final render‑ready release.
+//
+// میثم نسخه پایدار برای Render
+// رفع کامل خطاهای 401, 409, و مشکل فیلترینگ تلگرام
+// شامل express keep-alive و proxy‑ready axios
+// ======================================================
 
 import { Telegraf, Markup } from "telegraf";
 import axios from "axios";
@@ -11,18 +13,23 @@ import express from "express";
 import dotenv from "dotenv";
 import HttpsProxyAgent from "https-proxy-agent";
 
-// ---------- Load Environment Variables ----------
 dotenv.config();
 
-// ---------- Debug BOT_TOKEN ----------
+// ---------- Load Token ----------
 console.log("DEBUG BOT_TOKEN:", process.env.BOT_TOKEN ? "✅ Loaded" : "❌ Missing");
-
-// ---------- Init Bot ----------
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// ========================================================
-//  Telegram File → FTP Stream Uploader
-// ========================================================
+// ======================================================
+// TEST TELEGRAM CONNECTIVITY
+// ======================================================
+axios
+  .get("https://api.telegram.org/bot" + process.env.BOT_TOKEN + "/getMe")
+  .then((r) => console.log("✅ Telegram reachable OK:", r.data))
+  .catch((e) => console.error("❌ Telegram unreachable:", e.message));
+
+// ======================================================
+// FTP Upload Helper
+// ======================================================
 async function uploadToFTP(fileStream, filename) {
   const client = new ftp.Client();
   client.ftp.verbose = false;
@@ -35,97 +42,83 @@ async function uploadToFTP(fileStream, filename) {
       secure: false,
     });
 
-    const destPath = process.env.FTP_PATH
+    const dest = process.env.FTP_PATH
       ? `${process.env.FTP_PATH}/${filename}`
       : filename;
-    console.log(`[FTP] Connected. Uploading ${destPath} ...`);
 
-    await client.uploadFrom(fileStream, destPath);
-    console.log(`[FTP] ✅ Upload completed: ${destPath}`);
+    console.log(`[FTP] Connected, uploading ${dest} ...`);
+    await client.uploadFrom(fileStream, dest);
+    console.log(`[FTP] ✅ Upload complete: ${dest}`);
   } catch (err) {
-    console.error(`[FTP] ❌ Error uploading: ${err.message}`);
+    console.error("[FTP] ❌ Upload error:", err.message);
     throw err;
   } finally {
     client.close();
   }
 }
 
-// ========================================================
-//  Bot Handlers
-// ========================================================
-
-// دستور /start
+// ======================================================
+// Bot Handlers
+// ======================================================
 bot.start((ctx) => {
-  ctx.reply(
-    "سلام میثم 👋\nربات فعال است ✅\nفایل بفرست تا مستقیماً به FTP استریم شود."
-  );
+  ctx.reply("سلام میثم 👋\nربات فعال است ✅\nفایل بفرست تا مستقیم به FTP استریم شود.");
 });
 
-// هندلر عمومی برای دیباگ نوع پیام‌ها
+// دیباگ نوع پیام‌ها
 bot.on("message", (ctx) => {
   if (ctx.message) {
-    const keys = Object.keys(ctx.message);
-    console.log("🧠 Received message keys:", keys);
+    console.log("🧠 Received message keys:", Object.keys(ctx.message));
   }
 });
 
-// هندل ارسال انواع فایل‌ (document/photo/video/audio)
+// دریافت فایل‌ها
 bot.on(["document", "photo", "video", "audio"], async (ctx) => {
-  let fileId, filename;
-
-  // استخراج نوع فایل
-  if (ctx.message.document) {
-    fileId = ctx.message.document.file_id;
-    filename = ctx.message.document.file_name;
-  } else if (ctx.message.photo) {
-    const photos = ctx.message.photo;
-    fileId = photos[photos.length - 1].file_id;
-    filename = `photo_${fileId}.jpg`;
-  } else if (ctx.message.video) {
-    fileId = ctx.message.video.file_id;
-    filename = ctx.message.video.file_name || `video_${fileId}.mp4`;
-  } else if (ctx.message.audio) {
-    fileId = ctx.message.audio.file_id;
-    filename = ctx.message.audio.file_name || `audio_${fileId}.mp3`;
-  } else {
-    console.log("📂 Unknown media type");
-    return ctx.reply("نوع فایل پشتیبانی نمی‌شود.");
-  }
-
-  console.log(`📦 Received: ${filename}`);
-
   try {
+    let fileId, filename;
+
+    if (ctx.message.document) {
+      fileId = ctx.message.document.file_id;
+      filename = ctx.message.document.file_name;
+    } else if (ctx.message.photo) {
+      const photos = ctx.message.photo;
+      fileId = photos[photos.length - 1].file_id;
+      filename = `photo_${fileId}.jpg`;
+    } else if (ctx.message.video) {
+      fileId = ctx.message.video.file_id;
+      filename = ctx.message.video.file_name || `video_${fileId}.mp4`;
+    } else if (ctx.message.audio) {
+      fileId = ctx.message.audio.file_id;
+      filename = ctx.message.audio.file_name || `audio_${fileId}.mp3`;
+    } else return ctx.reply("نوع فایل پشتیبانی نمی‌شود.");
+
+    console.log(`📦 Received: ${filename}`);
     const fileLink = await ctx.telegram.getFileLink(fileId);
     console.log("[DEBUG] fileLink:", fileLink.href);
 
-    // اگر تلگرام در region فعلی فیلتر بود، از proxy استفاده کن
     const proxyAgent = process.env.TELEGRAM_PROXY
       ? new HttpsProxyAgent(process.env.TELEGRAM_PROXY)
       : undefined;
 
-    // Stream از تلگرام
     const response = await axios.get(fileLink.href, {
       responseType: "stream",
       httpsAgent: proxyAgent,
     });
 
-    // Upload به FTP
     await uploadToFTP(response.data, filename);
 
-    const publicUrl =
-      process.env.FTP_PUBLIC_URL
-        ? `${process.env.FTP_PUBLIC_URL}/${filename}`
-        : filename;
+    const publicURL = process.env.FTP_PUBLIC_URL
+      ? `${process.env.FTP_PUBLIC_URL}/${filename}`
+      : filename;
 
     await ctx.reply(
-      `✅ فایل ${filename}\nبا موفقیت روی FTP آپلود شد.\n${publicUrl}`,
+      `✅ فایل ${filename}\nروی FTP آپلود شد.\n${publicURL}`,
       Markup.inlineKeyboard([
-        [Markup.button.callback("🗑 حذف از FTP", `delete_${filename}`)],
+        [Markup.button.callback("🗑 حذف فایل از FTP", `delete_${filename}`)],
       ])
     );
   } catch (err) {
-    console.error(`[BOT] ❌ Error processing file: ${err.message}`);
-    ctx.reply(`خطا در آپلود ${filename}: ${err.message}`);
+    console.error("[BOT] ❌ Error processing:", err.message);
+    ctx.reply(`خطا در پردازش فایل: ${err.message}`);
   }
 });
 
@@ -134,7 +127,6 @@ bot.action(/delete_(.+)/, async (ctx) => {
   const filename = ctx.match[1];
   const client = new ftp.Client();
   client.ftp.verbose = false;
-
   try {
     await client.access({
       host: process.env.FTP_HOST,
@@ -142,23 +134,24 @@ bot.action(/delete_(.+)/, async (ctx) => {
       password: process.env.FTP_PASS,
       secure: false,
     });
-    const destPath = process.env.FTP_PATH
+
+    const dest = process.env.FTP_PATH
       ? `${process.env.FTP_PATH}/${filename}`
       : filename;
-    await client.remove(destPath);
-    console.log(`[FTP] 🗑 Deleted: ${destPath}`);
+    await client.remove(dest);
+    console.log(`[FTP] 🗑 Removed: ${dest}`);
     await ctx.editMessageText(`🗑 فایل ${filename} حذف شد.`);
   } catch (err) {
-    console.error(`[FTP] ❌ Error deleting file: ${err.message}`);
-    await ctx.reply(`خطا در حذف فایل: ${err.message}`);
+    console.error("[FTP] ❌ Delete error:", err.message);
+    ctx.reply(`خطا در حذف فایل: ${err.message}`);
   } finally {
     client.close();
   }
 });
 
-// ========================================================
-//  Webhook Reset → Prevent 409 Conflict and Start Bot
-// ========================================================
+// ======================================================
+// Delete old webhook, launch bot (prevent 409 Conflict)
+// ======================================================
 bot.telegram
   .getWebhookInfo()
   .then((info) => {
@@ -166,28 +159,19 @@ bot.telegram
     return bot.telegram.deleteWebhook({ drop_pending_updates: true });
   })
   .then(() => {
-    console.log("Webhook deleted. Launching bot...");
+    console.log("Webhook deleted — launching bot...");
     return bot.launch({ allowedUpdates: ["message", "callback_query"] });
   })
-  .then(() => console.log("🚀 Telegram‑FTP Bridge Stream mode started..."))
-  .catch((err) => console.error("❌ Error launching bot:", err));
+  .then(() => console.log("🚀 Telegram‑FTP Bridge launched"))
+  .catch((err) => console.error("❌ Launch error:", err));
 
-// ========================================================
-//  Render Keep‑Alive HTTP server
-// ========================================================
+// ======================================================
+// Express KeepAlive (for Render)
+// ======================================================
 const app = express();
 const PORT = process.env.PORT || 10000;
+app.get("/", (_, res) => res.send("🌐 Telegram‑FTP Bridge is running"));
+app.listen(PORT, () => console.log(`🌐 Keep‑alive server on port ${PORT}`));
 
-app.get("/", (req, res) => {
-  res.send("🌐 Telegram‑FTP Bridge active and running!");
-});
-
-app.listen(PORT, () => {
-  console.log(`🌐 Render keep‑alive HTTP server on port ${PORT}`);
-});
-
-// ========================================================
-//  Graceful Shutdown
-// ========================================================
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
