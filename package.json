@@ -10,7 +10,8 @@
   "dependencies": {
     "telegraf": "^4.16.0",
     "axios": "^1.7.2",
-    "basic-ftp": "^5.0.4"
+    "basic-ftp": "^5.0.4",
+    "dotenv": "^16.4.5"
   },
   "engines": {
     "node": ">=18"
