@@ -1,7 +1,7 @@
 // ========================================================
 //  Telegram–FTP Bridge  (Stream‑to‑FTP Architecture)
-//  Author: میثم + GapGPT
-//  Version: Final stable for Render (409‑safe)
+//  Author: Meysam Moradi + GapGPT
+//  Version: Final stable for Render (409‑safe, full‑stream)
 // ========================================================
 
 import { Telegraf, Markup } from "telegraf";
@@ -34,9 +34,13 @@ async function uploadToFTP(fileStream, filename) {
       secure: false,
     });
 
-    console.log(`[FTP] Connected. Uploading ${filename}...`);
-    await client.uploadFrom(fileStream, filename);
-    console.log(`[FTP] ✅ Upload completed: ${filename}`);
+    const destPath = process.env.FTP_PATH
+      ? `${process.env.FTP_PATH}/${filename}`
+      : filename;
+
+    console.log(`[FTP] Connected. Uploading ${destPath} ...`);
+    await client.uploadFrom(fileStream, destPath);
+    console.log(`[FTP] ✅ Upload completed: ${destPath}`);
   } catch (err) {
     console.error(`[FTP] ❌ Error uploading: ${err.message}`);
     throw err;
@@ -56,28 +60,56 @@ bot.start((ctx) => {
   );
 });
 
-// هندل ارسال فایل
-bot.on("document", async (ctx) => {
-  const file = ctx.message.document;
-  const filename = file.file_name;
+// هندلر عمومی برای دیباگ نوع پیام
+bot.on("message", (ctx) => {
+  if (ctx.message) {
+    const keys = Object.keys(ctx.message);
+    console.log("🧠 Received message keys:", keys);
+  }
+});
+
+// هندل ارسال فایل‌ (شامل document/photo/video/audio)
+bot.on(["document", "photo", "video", "audio"], async (ctx) => {
+  let fileId, filename;
+
+  // به‌تناسب نوع فایل، file_id و filename استخراج شود
+  if (ctx.message.document) {
+    fileId = ctx.message.document.file_id;
+    filename = ctx.message.document.file_name;
+  } else if (ctx.message.photo) {
+    const photos = ctx.message.photo;
+    fileId = photos[photos.length - 1].file_id;
+    filename = `photo_${fileId}.jpg`;
+  } else if (ctx.message.video) {
+    fileId = ctx.message.video.file_id;
+    filename = ctx.message.video.file_name || `video_${fileId}.mp4`;
+  } else if (ctx.message.audio) {
+    fileId = ctx.message.audio.file_id;
+    filename = ctx.message.audio.file_name || `audio_${fileId}.mp3`;
+  } else {
+    console.log("📂 Unknown media type");
+    return ctx.reply("نوع فایل پشتیبانی نمی‌شود.");
+  }
+
   console.log(`📦 Received: ${filename}`);
 
   try {
-    const fileLink = await ctx.telegram.getFileLink(file.file_id);
-    console.log(`[STREAM] Starting streaming from Telegram → FTP : ${filename}`);
+    const fileLink = await ctx.telegram.getFileLink(fileId);
+    console.log("[DEBUG] fileLink:", fileLink.href);
 
     const response = await axios.get(fileLink.href, { responseType: "stream" });
 
     await uploadToFTP(response.data, filename);
 
+    const publicUrl = `https://tunerhiv.ir/${process.env.FTP_PATH}/${filename}`;
     await ctx.reply(
-      `✅ ${filename}\nبا موفقیت روی FTP آپلود شد.`,
+      `✅ ${filename}\nبا موفقیت روی FTP آپلود شد.\n${publicUrl}`,
       Markup.inlineKeyboard([
         [Markup.button.callback("🗑 حذف از FTP", `delete_${filename}`)],
       ])
     );
   } catch (err) {
-    console.error(`[BOT] ❌ Error: ${err.message}`);
+    console.error(`[BOT] ❌ Error processing file: ${err.message}`);
     await ctx.reply(`خطا در آپلود ${filename}: ${err.message}`);
   }
 });
@@ -94,8 +126,11 @@ bot.action(/delete_(.+)/, async (ctx) => {
       password: process.env.FTP_PASS,
       secure: false,
     });
-    await client.remove(filename);
-    console.log(`[FTP] 🗑 Deleted: ${filename}`);
+    const destPath = process.env.FTP_PATH
+      ? `${process.env.FTP_PATH}/${filename}`
+      : filename;
+    await client.remove(destPath);
+    console.log(`[FTP] 🗑 Deleted: ${destPath}`);
     await ctx.editMessageText(`🗑 فایل ${filename} حذف شد.`);
   } catch (err) {
     console.error(`[FTP] ❌ Error deleting file: ${err.message}`);
@@ -108,17 +143,18 @@ bot.action(/delete_(.+)/, async (ctx) => {
 // ========================================================
 //  Webhook Reset to Avoid 409 & Start Bot
 // ========================================================
-bot.telegram.getWebhookInfo()
-  .then(info => {
+bot.telegram
+  .getWebhookInfo()
+  .then((info) => {
     console.log("Current webhook:", info.url || "none");
     return bot.telegram.deleteWebhook({ drop_pending_updates: true });
   })
   .then(() => {
     console.log("Webhook deleted. Launching bot...");
-    return bot.launch();
+    return bot.launch({ allowedUpdates: ["message", "callback_query"] });
   })
   .then(() => console.log("🚀 Telegram‑FTP Bridge Stream mode started..."))
-  .catch(err => console.error("❌ Error launching bot:", err));
+  .catch((err) => console.error("❌ Error launching bot:", err));
 
 // ========================================================
 //  Render Keep‑Alive HTTP server
