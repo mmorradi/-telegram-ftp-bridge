@@ -1,8 +1,13 @@
 import axios from "axios";
 import ftp from "basic-ftp";
 import { Telegraf, Markup } from "telegraf";
+import dotenv from "dotenv";
 
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+// بارگذاری متغیرهای محیطی از Render یا فایل .env لوکال
+dotenv.config();
+
+// ========================= Bot Init =========================
+const bot = new Telegraf(process.env.BOT_TOKEN);
 
 // ========================= FTP Upload (Stream Mode) =========================
 async function uploadToFTP(fileUrl, fileName) {
@@ -15,12 +20,12 @@ async function uploadToFTP(fileUrl, fileName) {
     const ftpPath = process.env.FTP_PATH || "temp";
 
     try {
-        // اتصال و لاگ مسیر جاری
+        // اتصال به سرور FTP
         await client.access({
             host: ftpHost,
             user: ftpUser,
             password: ftpPass,
-            secure: false
+            secure: false,
         });
 
         const pwd = await client.pwd();
@@ -40,7 +45,7 @@ async function uploadToFTP(fileUrl, fileName) {
         await client.uploadFrom(response.data, targetPath);
         console.log(`[STREAM] Upload completed: ${targetPath}`);
 
-        // --- ساخت لینک عمومی (حذف public_html) ---
+        // --- ساخت لینک عمومی (بدون public_html در URL) ---
         const fileUrlPublic = `https://tunerhiv.ir/${ftpPath}/${fileName}`;
 
         await client.close();
@@ -58,8 +63,9 @@ bot.on("document", async (ctx) => {
     console.log(`📦 Received: ${fileName}`);
 
     try {
+        // === دریافت مسیر فایل از Telegram ===
         const fileInfo = await ctx.telegram.getFile(fileId);
-        const telegramFileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+        const telegramFileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${fileInfo.file_path}`;
 
         // آپلود و ساخت لینک عمومی
         const publicUrl = await uploadToFTP(telegramFileUrl, fileName);
@@ -69,11 +75,11 @@ bot.on("document", async (ctx) => {
             `فایل با موفقیت آپلود شد ✅`,
             Markup.inlineKeyboard([
                 [Markup.button.url("📥 دانلود فایل", publicUrl)],
-                [Markup.button.callback("🗑 حذف فایل", `delete_${fileName}`)]
+                [Markup.button.callback("🗑 حذف فایل", `delete_${fileName}`)],
             ])
         );
     } catch (error) {
-        console.error("Upload failed:", error.message);
+        console.error("❌ Upload failed:", error.message);
         ctx.reply("❌ خطا در آپلود فایل به FTP رخ داد.");
     }
 });
@@ -89,7 +95,7 @@ bot.action(/delete_(.+)/, async (ctx) => {
             host: process.env.FTP_HOST,
             user: process.env.FTP_USER,
             password: process.env.FTP_PASS,
-            secure: false
+            secure: false,
         });
 
         const ftpPath = process.env.FTP_PATH || "temp";
@@ -97,6 +103,7 @@ bot.action(/delete_(.+)/, async (ctx) => {
 
         await client.remove(targetPath);
         console.log(`✅ فایل حذف شد از FTP: ${targetPath}`);
+
         await ctx.answerCbQuery();
         await ctx.editMessageText(`🗑 فایل از سرور حذف شد.`);
 
