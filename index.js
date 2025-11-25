@@ -1,7 +1,7 @@
 // ========================================================
 //  Telegram–FTP Bridge  (Stream‑to‑FTP Architecture)
 //  Author: میثم + GapGPT
-//  Version: Final stable for Render
+//  Version: Final stable for Render (409‑safe)
 // ========================================================
 
 import { Telegraf, Markup } from "telegraf";
@@ -16,12 +16,12 @@ dotenv.config();
 // ---------- Debug check BOT_TOKEN ----------
 console.log("DEBUG BOT_TOKEN:", process.env.BOT_TOKEN ? "✅ Loaded" : "❌ Missing");
 
+// ---------- Init Bot ----------
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 // ========================================================
 //  Telegram File → FTP Stream Uploader
 // ========================================================
-
 async function uploadToFTP(fileStream, filename) {
   const client = new ftp.Client();
   client.ftp.verbose = false;
@@ -52,7 +52,7 @@ async function uploadToFTP(fileStream, filename) {
 // دستور /start
 bot.start((ctx) => {
   return ctx.reply(
-    "سلام میثم 👋\nربات فعال است ✅\nفایل بفرست تا مستقیماً به FTP استریم شود.",
+    "سلام میثم 👋\nربات فعال است ✅\nفایل بفرست تا مستقیماً به FTP استریم شود."
   );
 });
 
@@ -66,9 +66,7 @@ bot.on("document", async (ctx) => {
     const fileLink = await ctx.telegram.getFileLink(file.file_id);
     console.log(`[STREAM] Starting streaming from Telegram → FTP : ${filename}`);
 
-    const response = await axios.get(fileLink.href, {
-      responseType: "stream",
-    });
+    const response = await axios.get(fileLink.href, { responseType: "stream" });
 
     await uploadToFTP(response.data, filename);
 
@@ -76,7 +74,7 @@ bot.on("document", async (ctx) => {
       `✅ ${filename}\nبا موفقیت روی FTP آپلود شد.`,
       Markup.inlineKeyboard([
         [Markup.button.callback("🗑 حذف از FTP", `delete_${filename}`)],
-      ]),
+      ])
     );
   } catch (err) {
     console.error(`[BOT] ❌ Error: ${err.message}`);
@@ -110,21 +108,21 @@ bot.action(/delete_(.+)/, async (ctx) => {
 // ========================================================
 //  Webhook Reset to Avoid 409 & Start Bot
 // ========================================================
-
-(async () => {
-  try {
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    await bot.launch();
-    console.log("🚀 Telegram‑FTP Bridge Stream mode started...");
-  } catch (err) {
-    console.error("❌ Error launching bot:", err);
-  }
-})();
+bot.telegram.getWebhookInfo()
+  .then(info => {
+    console.log("Current webhook:", info.url || "none");
+    return bot.telegram.deleteWebhook({ drop_pending_updates: true });
+  })
+  .then(() => {
+    console.log("Webhook deleted. Launching bot...");
+    return bot.launch();
+  })
+  .then(() => console.log("🚀 Telegram‑FTP Bridge Stream mode started..."))
+  .catch(err => console.error("❌ Error launching bot:", err));
 
 // ========================================================
 //  Render Keep‑Alive HTTP server
 // ========================================================
-
 const app = express();
 const PORT = process.env.PORT || 10000;
 
@@ -139,6 +137,5 @@ app.listen(PORT, () => {
 // ========================================================
 //  Graceful Shutdown
 // ========================================================
-
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
